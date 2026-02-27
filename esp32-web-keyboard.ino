@@ -9,6 +9,48 @@ WebServer server(80);
 const char* ssid = "ESP-Keyboard";
 const char* pass = "12345678";
 
+// ── Flexispot desk (LoctekMotion) ──────────────────────────────────────────
+// Wiring (RJ45 → ESP32):
+//   RJ45 Pin 8 (+5V)  → VIN
+//   RJ45 Pin 7 (GND)  → GND
+//   RJ45 Pin 6 (TX)   → DESK_RX_PIN  (desk sends → ESP32 receives)
+//   RJ45 Pin 5 (RX)   → DESK_TX_PIN  (ESP32 sends → desk receives)
+//   RJ45 Pin 4 (PIN20)→ DESK_PIN20
+#define DESK_RX_PIN   16
+#define DESK_TX_PIN   17
+#define DESK_PIN20    23
+
+// Serial commands @ 9600 baud (LoctekMotion protocol)
+static const uint8_t CMD_UP[]      = {0x9b, 0x06, 0x02, 0x01, 0x00, 0xfc, 0xa0, 0x9d};
+static const uint8_t CMD_DOWN[]    = {0x9b, 0x06, 0x02, 0x02, 0x00, 0x0c, 0xa0, 0x9d};
+static const uint8_t CMD_PRESET1[] = {0x9b, 0x06, 0x02, 0x04, 0x00, 0xac, 0xa3, 0x9d};
+static const uint8_t CMD_PRESET2[] = {0x9b, 0x06, 0x02, 0x08, 0x00, 0xac, 0xa6, 0x9d};
+static const uint8_t CMD_PRESET3[] = {0x9b, 0x06, 0x02, 0x10, 0x00, 0xac, 0xac, 0x9d};
+static const uint8_t CMD_PRESET4[] = {0x9b, 0x06, 0x02, 0x00, 0x01, 0xac, 0x60, 0x9d};
+
+// How long since the last desk command before we assume the display has gone
+// to sleep and needs a PIN20 wake pulse (milliseconds).
+#define DESK_SLEEP_TIMEOUT_MS 20000UL
+
+unsigned long lastDeskCmdMs = 0;
+
+// Pulse PIN20 HIGH for ~1.2 s to activate the desk display.
+// Blocks briefly – acceptable since this only happens after a long idle.
+static void wakeDesk() {
+  digitalWrite(DESK_PIN20, HIGH);
+  delay(1200);
+  digitalWrite(DESK_PIN20, LOW);
+}
+
+static void sendDeskCmd(const uint8_t* cmd, size_t len) {
+  if (millis() - lastDeskCmdMs > DESK_SLEEP_TIMEOUT_MS) {
+    wakeDesk();  // auto-wake after idle; adds ~1.2 s on first press only
+  }
+  lastDeskCmdMs = millis();
+  Serial2.write(cmd, len);
+}
+// ──────────────────────────────────────────────────────────────────────────
+
 // Modifier-Bitmask:
 // 0x01 = LCtrl (0xE0)  0x02 = LShift (0xE1)
 // 0x04 = LAlt  (0xE2)  0x08 = LGUI   (0xE3)
@@ -29,6 +71,22 @@ void handleKey() {
   uint8_t key = (uint8_t)server.arg("c").toInt();
   uint8_t mod = server.hasArg("m") ? (uint8_t)server.arg("m").toInt() : 0;
   tap(key, mod);
+  server.send(200, "text/plain", "OK");
+}
+
+void handleDesk() {
+  if (!server.hasArg("cmd")) { server.send(400, "text/plain", "Missing cmd"); return; }
+  String cmd = server.arg("cmd");
+
+  if      (cmd == "up")    sendDeskCmd(CMD_UP,      sizeof(CMD_UP));
+  else if (cmd == "down")  sendDeskCmd(CMD_DOWN,    sizeof(CMD_DOWN));
+  else if (cmd == "p1")    sendDeskCmd(CMD_PRESET1, sizeof(CMD_PRESET1));
+  else if (cmd == "p2")    sendDeskCmd(CMD_PRESET2, sizeof(CMD_PRESET2));
+  else if (cmd == "p3")    sendDeskCmd(CMD_PRESET3, sizeof(CMD_PRESET3));
+  else if (cmd == "p4")    sendDeskCmd(CMD_PRESET4, sizeof(CMD_PRESET4));
+  else if (cmd == "wake")  { wakeDesk(); lastDeskCmdMs = millis(); }
+  else { server.send(400, "text/plain", "Unknown cmd"); return; }
+
   server.send(200, "text/plain", "OK");
 }
 
@@ -89,6 +147,35 @@ h3 { margin: 4px 0 4px; text-align: center; font-size: 15px; }
 .w6   { width: 213px; }
 .gap  { width: 10px; flex-shrink: 0; }
 .gap5 { width: 5px;  flex-shrink: 0; }
+
+/* Desk section */
+.desk-section {
+  margin-top: 14px;
+  border-top: 1px solid #2a4080;
+  padding-top: 10px;
+}
+.desk-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.dkey {
+  background: #0d2137;
+  color: #eee;
+  border: 1px solid #1a5276;
+  border-bottom: 3px solid #0a3352;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  padding: 0 6px;
+  flex-shrink: 0;
+  touch-action: none;
+}
+.dkey:active, .dkey.held { background: #1a5276; border-bottom-width: 1px; transform: translateY(2px); }
+.dkey-move { height: 52px; width: 60px; font-size: 20px; }
+.dkey-preset { height: 38px; width: 54px; }
+.dkey-wake  { height: 38px; width: 70px; background: #1a3a1a; border-color: #2a6a2a; border-bottom-color: #1a4a1a; }
+.dkey-wake:active { background: #2a6a2a; }
+#desk-status { font-size: 10px; color: #888; text-align: center; margin-top: 4px; height: 14px; }
 </style>
 </head>
 <body>
@@ -264,6 +351,32 @@ h3 { margin: 4px 0 4px; text-align: center; font-size: 15px; }
   </div>
 </div>
 
+<!-- ── Flexispot Desk Control ─────────────────────────── -->
+<div class="desk-section">
+  <h3>Flexispot E7</h3>
+  <div class="desk-row">
+    <!-- Up / Down (hold to move) -->
+    <button class="dkey dkey-move"
+      onmousedown="deskHold('up',this)" ontouchstart="deskHold('up',this)"
+      onmouseup="deskRelease(this)"     ontouchend="deskRelease(this)"
+      onmouseleave="deskRelease(this)">&#8679;</button>
+    <button class="dkey dkey-move"
+      onmousedown="deskHold('down',this)" ontouchstart="deskHold('down',this)"
+      onmouseup="deskRelease(this)"       ontouchend="deskRelease(this)"
+      onmouseleave="deskRelease(this)">&#8681;</button>
+    <div style="width:10px;flex-shrink:0;"></div>
+    <!-- Presets -->
+    <button class="dkey dkey-preset" onclick="desk('p1')">M1</button>
+    <button class="dkey dkey-preset" onclick="desk('p2')">M2</button>
+    <button class="dkey dkey-preset" onclick="desk('p3')">M3</button>
+    <button class="dkey dkey-preset" onclick="desk('p4')">M4</button>
+    <div style="width:10px;flex-shrink:0;"></div>
+    <!-- Manual wake (use if desk display has gone dark) -->
+    <button class="dkey dkey-wake" onclick="desk('wake')">Wake</button>
+  </div>
+  <div id="desk-status">Bereit</div>
+</div>
+
 </div><!-- .kb -->
 </div>
 
@@ -297,6 +410,30 @@ function k(code) {
     .then(() => { st.textContent = 'HID ' + code + (m ? ' mod=0x' + m.toString(16) : ''); })
     .catch(() => { st.textContent = 'Fehler!'; });
 }
+
+// ── Desk control ─────────────────────────────────────────────────────────
+let deskTimer = null;
+
+function desk(cmd) {
+  let st = document.getElementById('desk-status');
+  fetch('/desk?cmd=' + cmd)
+    .then(r => { st.textContent = cmd + ' OK'; })
+    .catch(() => { st.textContent = 'Desk Fehler!'; });
+}
+
+// Hold-to-move: sends the command every 200 ms while the button is pressed.
+// The first call also auto-wakes the desk if it has been idle.
+function deskHold(cmd, btn) {
+  if (deskTimer) return;          // already running (e.g. duplicate event)
+  btn.classList.add('held');
+  desk(cmd);                      // immediate first send
+  deskTimer = setInterval(() => desk(cmd), 200);
+}
+
+function deskRelease(btn) {
+  if (deskTimer) { clearInterval(deskTimer); deskTimer = null; }
+  btn.classList.remove('held');
+}
 </script>
 </body>
 </html>
@@ -307,9 +444,16 @@ void setup() {
   USB.begin();
   Keyboard.begin();
   delay(1000);
+
+  // Desk UART
+  pinMode(DESK_PIN20, OUTPUT);
+  digitalWrite(DESK_PIN20, LOW);
+  Serial2.begin(9600, SERIAL_8N1, DESK_RX_PIN, DESK_TX_PIN);
+
   WiFi.softAP(ssid, pass);
   server.on("/", handleRoot);
   server.on("/key", handleKey);
+  server.on("/desk", handleDesk);
   server.begin();
 }
 
